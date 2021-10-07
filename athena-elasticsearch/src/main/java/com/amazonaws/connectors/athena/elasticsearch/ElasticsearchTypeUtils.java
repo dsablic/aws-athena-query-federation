@@ -117,6 +117,16 @@ class ElasticsearchTypeUtils
         {
             Object fieldValue = ((Map) context).get(field.getName());
             dst.isSet = 1;
+            Map<String, String> metadata = field.getMetadata();
+            if (!metadata.isEmpty() && metadata.containsKey("path")) {
+              Object lookup = context;
+              for (String part : metadata.get("path").split("\\.")) {
+                lookup = ((Map) lookup).get(part);
+              }
+              fieldValue = lookup;
+              dst.value = String.valueOf(fieldValue);
+              return;
+            }
             if (fieldValue instanceof String) {
                 dst.value = (String) fieldValue;
             }

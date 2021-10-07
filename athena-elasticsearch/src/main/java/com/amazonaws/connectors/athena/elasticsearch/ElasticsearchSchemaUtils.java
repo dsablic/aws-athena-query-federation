@@ -134,7 +134,12 @@ class ElasticsearchSchemaUtils
             case "text":
             case "keyword":
             case "binary":
+            case "ip":
                 minorType = Types.MinorType.VARCHAR;
+                break;
+            case "alias":
+                minorType = Types.MinorType.VARCHAR;
+                metadata.put("path", (String) mapping.get("path"));
                 break;
             case "long":
                 minorType = Types.MinorType.BIGINT;
