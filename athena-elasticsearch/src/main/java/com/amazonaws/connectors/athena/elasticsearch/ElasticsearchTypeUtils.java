@@ -81,6 +81,23 @@ class ElasticsearchTypeUtils
     {
         Types.MinorType fieldType = Types.getMinorTypeForArrowType(field.getType());
 
+        Map<String, String> metadata = field.getMetadata();
+        if (!metadata.isEmpty() && metadata.containsKey("path")) {
+          return (VarCharExtractor) (Object context, NullableVarCharHolder dst) ->
+          {
+            dst.isSet = 1;
+            Object lookup = context;
+            for (String part : metadata.get("path").split("\\.")) {
+              lookup = ((Map) lookup).get(part);
+              if (lookup == null) {
+                dst.isSet = 0;
+                return;
+              }
+            }
+            dst.value = String.valueOf(lookup);
+          };
+        }
+
         switch (fieldType) {
             case VARCHAR:
                 return makeVarCharExtractor(field);
@@ -117,16 +134,6 @@ class ElasticsearchTypeUtils
         {
             Object fieldValue = ((Map) context).get(field.getName());
             dst.isSet = 1;
-            Map<String, String> metadata = field.getMetadata();
-            if (!metadata.isEmpty() && metadata.containsKey("path")) {
-              Object lookup = context;
-              for (String part : metadata.get("path").split("\\.")) {
-                lookup = ((Map) lookup).get(part);
-              }
-              fieldValue = lookup;
-              dst.value = String.valueOf(fieldValue);
-              return;
-            }
             if (fieldValue instanceof String) {
                 dst.value = (String) fieldValue;
             }
