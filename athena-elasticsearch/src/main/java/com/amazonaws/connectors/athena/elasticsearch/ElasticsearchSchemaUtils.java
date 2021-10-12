@@ -135,6 +135,7 @@ class ElasticsearchSchemaUtils
             case "keyword":
             case "binary":
             case "ip":
+            case "join":
                 minorType = Types.MinorType.VARCHAR;
                 break;
             case "alias":
