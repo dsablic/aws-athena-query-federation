@@ -187,7 +187,7 @@ class ElasticsearchQueryUtils
         for (Range range : constraint.getRanges().getOrderedRanges()) {
             if (range.isSingleValue()) {
                 String singleValue = range.getSingleValue().toString();
-                if (range.getType() instanceof ArrowType.Date) {
+                if (range.getType() instanceof ArrowType.Date || range.getType() instanceof ArrowType.Utf8) {
                     // Wrap a single date in quotes, e.g. my-birthday:("2000-11-11T06:57:44.123")
                     singleValues.add("\"" + singleValue + "\"");
                 }
