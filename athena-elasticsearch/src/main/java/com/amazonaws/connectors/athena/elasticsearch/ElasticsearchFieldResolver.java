@@ -75,6 +75,9 @@ public class ElasticsearchFieldResolver
                 return null;
             }
         }
+        else if (originalValue instanceof ArrayList) {
+            return coerceField(field, originalValue);
+        }
         else {
             throw new IllegalArgumentException("Invalid argument type. Expecting a Map, but got: " +
                     originalValue.getClass().getTypeName());
@@ -87,6 +90,9 @@ public class ElasticsearchFieldResolver
                 if (fieldValue instanceof Map) {
                     // Both fieldType and fieldValue are nested structures => return as map.
                     return fieldValue;
+                }
+                else if (fieldValue instanceof ArrayList) {
+                    return coerceField(field, fieldValue);
                 }
                 break;
             default:
