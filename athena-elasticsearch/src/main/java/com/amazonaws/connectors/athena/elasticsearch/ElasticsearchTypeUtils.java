@@ -34,6 +34,7 @@ import com.amazonaws.athena.connector.lambda.data.writers.fieldwriters.FieldWrit
 import com.amazonaws.athena.connector.lambda.data.writers.fieldwriters.FieldWriterFactory;
 import com.amazonaws.athena.connector.lambda.data.writers.holders.NullableVarCharHolder;
 import com.amazonaws.athena.connector.lambda.domain.predicate.ConstraintProjector;
+import com.google.common.base.Splitter;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.holders.NullableBigIntHolder;
 import org.apache.arrow.vector.holders.NullableBitHolder;
@@ -55,6 +56,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -67,9 +69,18 @@ class ElasticsearchTypeUtils
     private static final Logger logger = LoggerFactory.getLogger(ElasticsearchTypeUtils.class);
     private final ElasticsearchFieldResolver fieldResolver;
 
+    private static final String LOWERCASE_FIELDS = "lowercase_fields";
+    private final List<String> lowercaseFields;
+
     protected ElasticsearchTypeUtils()
     {
         this.fieldResolver = new ElasticsearchFieldResolver();
+        if (System.getenv(LOWERCASE_FIELDS) != null) {
+            this.lowercaseFields = Splitter.on(",").trimResults().splitToList(System.getenv(LOWERCASE_FIELDS));
+        }
+        else {
+            this.lowercaseFields = new ArrayList<String>();
+        }
     }
 
     /**
@@ -136,6 +147,9 @@ class ElasticsearchTypeUtils
             dst.isSet = 1;
             if (fieldValue instanceof String) {
                 dst.value = (String) fieldValue;
+                if (this.lowercaseFields.contains(field.getName())) {
+                    dst.value = dst.value.toLowerCase();
+                }
             }
             else if (fieldValue instanceof List) {
                 Object value = ((List) fieldValue).get(0);
