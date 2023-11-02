@@ -83,26 +83,33 @@ public abstract class JdbcMetadataHandler
     /**
      * Used only by Multiplexing handler. All calls will be delegated to respective database handler.
      */
-    protected JdbcMetadataHandler()
+    protected JdbcMetadataHandler(String sourceType, java.util.Map<String, String> configOptions)
     {
-        super(null);
+        super(sourceType, configOptions);
         this.jdbcConnectionFactory = null;
         this.databaseConnectionConfig = null;
     }
 
-    protected JdbcMetadataHandler(final DatabaseConnectionConfig databaseConnectionConfig, final JdbcConnectionFactory jdbcConnectionFactory)
+    protected JdbcMetadataHandler(
+        DatabaseConnectionConfig databaseConnectionConfig,
+        JdbcConnectionFactory jdbcConnectionFactory,
+        java.util.Map<String, String> configOptions)
     {
-        super(databaseConnectionConfig.getType().getDbName());
+        super(databaseConnectionConfig.getEngine(), configOptions);
         this.jdbcConnectionFactory = Validate.notNull(jdbcConnectionFactory, "jdbcConnectionFactory must not be null");
 
         this.databaseConnectionConfig = Validate.notNull(databaseConnectionConfig, "databaseConnectionConfig must not be null");
     }
 
     @VisibleForTesting
-    protected JdbcMetadataHandler(final DatabaseConnectionConfig databaseConnectionConfig, final AWSSecretsManager secretsManager,
-            final AmazonAthena athena, final JdbcConnectionFactory jdbcConnectionFactory)
+    protected JdbcMetadataHandler(
+        DatabaseConnectionConfig databaseConnectionConfig,
+        AWSSecretsManager secretsManager,
+        AmazonAthena athena,
+        JdbcConnectionFactory jdbcConnectionFactory,
+        java.util.Map<String, String> configOptions)
     {
-        super(null, secretsManager, athena, databaseConnectionConfig.getType().getDbName(), null, null);
+        super(null, secretsManager, athena, databaseConnectionConfig.getEngine(), null, null, configOptions);
         this.jdbcConnectionFactory = Validate.notNull(jdbcConnectionFactory, "jdbcConnectionFactory must not be null");
         this.databaseConnectionConfig = Validate.notNull(databaseConnectionConfig, "databaseConnectionConfig must not be null");
     }
@@ -125,13 +132,11 @@ public abstract class JdbcMetadataHandler
 
     @Override
     public ListSchemasResponse doListSchemaNames(final BlockAllocator blockAllocator, final ListSchemasRequest listSchemasRequest)
+            throws Exception
     {
         try (Connection connection = jdbcConnectionFactory.getConnection(getCredentialProvider())) {
             LOGGER.info("{}: List schema names for Catalog {}", listSchemasRequest.getQueryId(), listSchemasRequest.getCatalogName());
             return new ListSchemasResponse(listSchemasRequest.getCatalogName(), listDatabaseNames(connection));
-        }
-        catch (SQLException sqlException) {
-            throw new RuntimeException(sqlException.getErrorCode() + ": " + sqlException.getMessage());
         }
     }
 
@@ -153,24 +158,23 @@ public abstract class JdbcMetadataHandler
 
     @Override
     public ListTablesResponse doListTables(final BlockAllocator blockAllocator, final ListTablesRequest listTablesRequest)
+            throws Exception
     {
         try (Connection connection = jdbcConnectionFactory.getConnection(getCredentialProvider())) {
-            LOGGER.info("{}: List table names for Catalog {}, Table {}", listTablesRequest.getQueryId(), listTablesRequest.getCatalogName(), listTablesRequest.getSchemaName());
+            LOGGER.info("{}: List table names for Catalog {}, Schema {}", listTablesRequest.getQueryId(),
+                    listTablesRequest.getCatalogName(), listTablesRequest.getSchemaName());
             return new ListTablesResponse(listTablesRequest.getCatalogName(),
                     listTables(connection, listTablesRequest.getSchemaName()), null);
         }
-        catch (SQLException sqlException) {
-            throw new RuntimeException(sqlException.getErrorCode() + ": " + sqlException.getMessage());
-        }
     }
 
-    private List<TableName> listTables(final Connection jdbcConnection, final String databaseName)
+    protected List<TableName> listTables(final Connection jdbcConnection, final String databaseName)
             throws SQLException
     {
         try (ResultSet resultSet = getTables(jdbcConnection, databaseName)) {
             ImmutableList.Builder<TableName> list = ImmutableList.builder();
             while (resultSet.next()) {
-                list.add(getSchemaTableName(resultSet));
+                list.add(JDBCUtil.getSchemaTableName(resultSet));
             }
             return list.build();
         }
@@ -185,15 +189,7 @@ public abstract class JdbcMetadataHandler
                 connection.getCatalog(),
                 escapeNamePattern(schemaName, escape),
                 null,
-                new String[] {"TABLE", "VIEW", "EXTERNAL TABLE"});
-    }
-
-    private TableName getSchemaTableName(final ResultSet resultSet)
-            throws SQLException
-    {
-        return new TableName(
-                resultSet.getString("TABLE_SCHEM"),
-                resultSet.getString("TABLE_NAME"));
+                new String[] {"TABLE", "VIEW", "EXTERNAL TABLE", "MATERIALIZED VIEW"});
     }
 
     protected String escapeNamePattern(final String name, final String escape)
@@ -211,19 +207,34 @@ public abstract class JdbcMetadataHandler
 
     @Override
     public GetTableResponse doGetTable(final BlockAllocator blockAllocator, final GetTableRequest getTableRequest)
+            throws Exception
     {
         try (Connection connection = jdbcConnectionFactory.getConnection(getCredentialProvider())) {
             Schema partitionSchema = getPartitionSchema(getTableRequest.getCatalogName());
-            return new GetTableResponse(getTableRequest.getCatalogName(), getTableRequest.getTableName(), getSchema(connection, getTableRequest.getTableName(), partitionSchema),
-                    partitionSchema.getFields().stream().map(Field::getName).collect(Collectors.toSet()));
-        }
-        catch (SQLException sqlException) {
-            throw new RuntimeException(sqlException.getErrorCode() + ": " + sqlException.getMessage());
+            TableName caseInsensitiveTableMatch = caseInsensitiveTableSearch(connection, getTableRequest.getTableName().getSchemaName(),
+                    getTableRequest.getTableName().getTableName());
+            Schema caseInsensitiveSchemaMatch = getSchema(connection, caseInsensitiveTableMatch, partitionSchema);
+            return new GetTableResponse(getTableRequest.getCatalogName(), caseInsensitiveTableMatch, caseInsensitiveSchemaMatch,
+                        partitionSchema.getFields().stream().map(Field::getName).collect(Collectors.toSet()));
         }
     }
 
+    /**
+     * While being a no-op by default, this function will be overriden by subclasses that support this search.
+     *
+     * @param connection
+     * @param databaseName
+     * @param tableName
+     * @return TableName containing the resolved case sensitive table name.
+     */
+    protected TableName caseInsensitiveTableSearch(Connection connection, final String databaseName,
+                                                     final String tableName) throws Exception
+    {
+        return new TableName(databaseName, tableName);
+    }
+
     private Schema getSchema(Connection jdbcConnection, TableName tableName, Schema partitionSchema)
-            throws SQLException
+            throws Exception
     {
         SchemaBuilder schemaBuilder = SchemaBuilder.newBuilder();
 
@@ -233,7 +244,8 @@ public abstract class JdbcMetadataHandler
                 ArrowType columnType = JdbcArrowTypeConverter.toArrowType(
                         resultSet.getInt("DATA_TYPE"),
                         resultSet.getInt("COLUMN_SIZE"),
-                        resultSet.getInt("DECIMAL_DIGITS"));
+                        resultSet.getInt("DECIMAL_DIGITS"),
+                        configOptions);
                 String columnName = resultSet.getString("COLUMN_NAME");
                 if (columnType != null && SupportedTypes.isSupported(columnType)) {
                     if (columnType instanceof ArrowType.List) {
@@ -256,7 +268,7 @@ public abstract class JdbcMetadataHandler
             }
 
             if (!found) {
-                throw new RuntimeException("Could not find table in " + tableName.getSchemaName());
+                throw new RuntimeException(String.format("Could not find table %s in %s", tableName.getTableName(), tableName.getSchemaName()));
             }
 
             // add partition columns

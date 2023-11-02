@@ -21,17 +21,19 @@ package com.amazonaws.athena.connectors.jdbc.manager;
 
 import com.amazonaws.athena.connector.lambda.domain.Split;
 import com.amazonaws.athena.connector.lambda.domain.predicate.Constraints;
+import com.amazonaws.athena.connector.lambda.domain.predicate.OrderByField;
 import com.amazonaws.athena.connector.lambda.domain.predicate.Range;
 import com.amazonaws.athena.connector.lambda.domain.predicate.SortedRangeSet;
 import com.amazonaws.athena.connector.lambda.domain.predicate.ValueSet;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.Iterables;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.arrow.vector.types.Types;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,6 +49,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -60,13 +63,25 @@ public abstract class JdbcSplitQueryBuilder
     private static final int MILLIS_SHIFT = 12;
 
     private final String quoteCharacters;
+    protected final String emptyString = "";
+
+    private final FederationExpressionParser jdbcFederationExpressionParser;
+
+    /**
+     * Meant for connectors which do not yet support complex expressions.
+     */
+    public JdbcSplitQueryBuilder(String quoteCharacters)
+    {
+        this(quoteCharacters, new DefaultJdbcFederationExpressionParser());
+    }
 
     /**
      * @param quoteCharacters database quote character for enclosing identifiers.
      */
-    public JdbcSplitQueryBuilder(String quoteCharacters)
+    public JdbcSplitQueryBuilder(String quoteCharacters, FederationExpressionParser federationExpressionParser)
     {
-        this.quoteCharacters = Validate.notBlank(quoteCharacters, "quoteCharacters must not be blank");
+        this.quoteCharacters = quoteCharacters;
+        this.jdbcFederationExpressionParser = federationExpressionParser;
     }
 
     /**
@@ -82,6 +97,7 @@ public abstract class JdbcSplitQueryBuilder
      * @return prepated statement with SQL. See {@link PreparedStatement}.
      * @throws SQLException JDBC database exception.
      */
+    @SuppressFBWarnings("SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING")
     public PreparedStatement buildSql(
             final Connection jdbcConnection,
             final String catalog,
@@ -102,10 +118,10 @@ public abstract class JdbcSplitQueryBuilder
 
         sql.append("SELECT ");
         sql.append(columnNames);
+
         if (columnNames.isEmpty()) {
             sql.append("null");
         }
-
         sql.append(getFromClauseWithSplit(catalog, schema, table, split));
 
         List<TypeAndValue> accumulator = new ArrayList<>();
@@ -117,9 +133,20 @@ public abstract class JdbcSplitQueryBuilder
                     .append(Joiner.on(" AND ").join(clauses));
         }
 
+        String orderByClause = extractOrderByClause(constraints);
+
+        if (!Strings.isNullOrEmpty(orderByClause)) {
+            sql.append(" ").append(orderByClause);
+        }
+
+        if (constraints.getLimit() > 0) {
+            sql.append(appendLimitOffset(split, constraints));
+        }
+        else {
+            sql.append(appendLimitOffset(split)); // legacy method to preserve functionality of existing connector impls
+        }
         LOGGER.info("Generated SQL : {}", sql.toString());
         PreparedStatement statement = jdbcConnection.prepareStatement(sql.toString());
-
         // TODO all types, converts Arrow values to JDBC.
         for (int i = 0; i < accumulator.size(); i++) {
             TypeAndValue typeAndValue = accumulator.get(i);
@@ -149,8 +176,17 @@ public abstract class JdbcSplitQueryBuilder
                     statement.setBoolean(i + 1, (boolean) typeAndValue.getValue());
                     break;
                 case DATEDAY:
-                    statement.setDate(i + 1,
-                            new Date(TimeUnit.DAYS.toMillis(((Number) typeAndValue.getValue()).longValue())));
+                    //we received value in "UTC" time with DAYS only, appended it to timeMilli in UTC
+                    long utcMillis = TimeUnit.DAYS.toMillis(((Number) typeAndValue.getValue()).longValue());
+                    //Get the default timezone offset and offset it.
+                    //This is because sql.Date will parse millis into localtime zone
+                    //ex system timezone in GMT-5, sql.Date will think the utcMillis is in GMT-5, we need to add offset(eg. -18000000) .
+                    //ex system timezone in GMT+9, sql.Date will think the utcMillis is in GMT+9, we need to remove offset(eg. 32400000).
+                    TimeZone aDefault = TimeZone.getDefault();
+                    int offset = aDefault.getOffset(utcMillis);
+                    utcMillis -= offset;
+
+                    statement.setDate(i + 1, new Date(utcMillis));
                     break;
                 case DATEMILLI:
                     LocalDateTime timestamp = ((LocalDateTime) typeAndValue.getValue());
@@ -173,6 +209,21 @@ public abstract class JdbcSplitQueryBuilder
         return statement;
     }
 
+    protected String extractOrderByClause(Constraints constraints)
+    {
+        List<OrderByField> orderByClause = constraints.getOrderByClause();
+        if (orderByClause == null || orderByClause.size() == 0) {
+            return "";
+        }
+        return "ORDER BY " + orderByClause.stream()
+            .map(orderByField -> {
+                String ordering = orderByField.getDirection().isAscending() ? "ASC" : "DESC";
+                String nullsHandling = orderByField.getDirection().isNullsFirst() ? "NULLS FIRST" : "NULLS LAST";
+                return quote(orderByField.getColumnName()) + " " + ordering + " " + nullsHandling;
+            })
+            .collect(Collectors.joining(", "));
+    }
+
     protected abstract String getFromClauseWithSplit(final String catalog, final String schema, final String table, final Split split);
 
     protected abstract List<String> getPartitionWhereClauses(final Split split);
@@ -192,6 +243,7 @@ public abstract class JdbcSplitQueryBuilder
                 }
             }
         }
+        conjuncts.addAll(jdbcFederationExpressionParser.parseComplexExpressions(columns, constraints, accumulator)); // not part of loop bc not per-column
         return conjuncts;
     }
 
@@ -211,8 +263,8 @@ public abstract class JdbcSplitQueryBuilder
                 disjuncts.add(String.format("(%s IS NULL)", quote(columnName)));
             }
 
-            Range rangeSpan = ((SortedRangeSet) valueSet).getSpan();
-            if (!valueSet.isNullAllowed() && rangeSpan.getLow().isLowerUnbounded() && rangeSpan.getHigh().isUpperUnbounded()) {
+            List<Range> rangeList = ((SortedRangeSet) valueSet).getOrderedRanges();
+            if (rangeList.size() == 1 && !valueSet.isNullAllowed() && rangeList.get(0).getLow().isLowerUnbounded() && rangeList.get(0).getHigh().isUpperUnbounded()) {
                 return String.format("(%s IS NOT NULL)", quote(columnName));
             }
 
@@ -285,34 +337,14 @@ public abstract class JdbcSplitQueryBuilder
         return quoteCharacters + name + quoteCharacters;
     }
 
-    private static class TypeAndValue
+    protected String appendLimitOffset(Split split)
     {
-        private final ArrowType type;
-        private final Object value;
+        // keeping this method for connectors that still override this (SAP Hana + Snowflake)
+        return emptyString;
+    }
 
-        TypeAndValue(ArrowType type, Object value)
-        {
-            this.type = Validate.notNull(type, "type is null");
-            this.value = Validate.notNull(value, "value is null");
-        }
-
-        ArrowType getType()
-        {
-            return type;
-        }
-
-        Object getValue()
-        {
-            return value;
-        }
-
-        @Override
-        public String toString()
-        {
-            return "TypeAndValue{" +
-                    "type=" + type +
-                    ", value=" + value +
-                    '}';
-        }
+    protected String appendLimitOffset(Split split, Constraints constraints)
+    {
+        return " LIMIT " + constraints.getLimit();
     }
 }

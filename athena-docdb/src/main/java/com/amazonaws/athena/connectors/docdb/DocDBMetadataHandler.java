@@ -42,11 +42,15 @@ import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.glue.AWSGlue;
 import com.amazonaws.services.glue.model.Table;
 import com.amazonaws.services.secretsmanager.AWSSecretsManager;
+import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
+import com.mongodb.MongoCommandException;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCursor;
 import org.apache.arrow.util.VisibleForTesting;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -71,9 +75,6 @@ public class DocDBMetadataHandler
 
     //Used to denote the 'type' of this connector for diagnostic purposes.
     private static final String SOURCE_TYPE = "documentdb";
-    //The Env variable name used to indicate that we want to disable the use of Glue DataCatalog for supplemental
-    //metadata and instead rely solely on the connector's schema inference capabilities.
-    private static final String GLUE_ENV = "disable_glue";
     //Field name used to store the connection string as a property on Split objects.
     protected static final String DOCDB_CONN_STR = "connStr";
     //The Env variable name used to store the default DocDB connection string if no catalog specific
@@ -90,24 +91,25 @@ public class DocDBMetadataHandler
     private final AWSGlue glue;
     private final DocDBConnectionFactory connectionFactory;
 
-    public DocDBMetadataHandler()
+    public DocDBMetadataHandler(java.util.Map<String, String> configOptions)
     {
-        //Disable Glue if the env var is present and not explicitly set to "false"
-        super((System.getenv(GLUE_ENV) != null && !"false".equalsIgnoreCase(System.getenv(GLUE_ENV))), SOURCE_TYPE);
+        super(SOURCE_TYPE, configOptions);
         glue = getAwsGlue();
         connectionFactory = new DocDBConnectionFactory();
     }
 
     @VisibleForTesting
-    protected DocDBMetadataHandler(AWSGlue glue,
-            DocDBConnectionFactory connectionFactory,
-            EncryptionKeyFactory keyFactory,
-            AWSSecretsManager secretsManager,
-            AmazonAthena athena,
-            String spillBucket,
-            String spillPrefix)
+    protected DocDBMetadataHandler(
+        AWSGlue glue,
+        DocDBConnectionFactory connectionFactory,
+        EncryptionKeyFactory keyFactory,
+        AWSSecretsManager secretsManager,
+        AmazonAthena athena,
+        String spillBucket,
+        String spillPrefix,
+        java.util.Map<String, String> configOptions)
     {
-        super(glue, keyFactory, secretsManager, athena, SOURCE_TYPE, spillBucket, spillPrefix);
+        super(glue, keyFactory, secretsManager, athena, SOURCE_TYPE, spillBucket, spillPrefix, configOptions);
         this.glue = glue;
         this.connectionFactory = connectionFactory;
     }
@@ -124,11 +126,11 @@ public class DocDBMetadataHandler
      */
     private String getConnStr(MetadataRequest request)
     {
-        String conStr = System.getenv(request.getCatalogName());
+        String conStr = configOptions.get(request.getCatalogName());
         if (conStr == null) {
             logger.info("getConnStr: No environment variable found for catalog {} , using default {}",
                     request.getCatalogName(), DEFAULT_DOCDB);
-            conStr = System.getenv(DEFAULT_DOCDB);
+            conStr = configOptions.get(DEFAULT_DOCDB);
         }
         return conStr;
     }
@@ -145,7 +147,11 @@ public class DocDBMetadataHandler
         MongoClient client = getOrCreateConn(request);
         try (MongoCursor<String> itr = client.listDatabaseNames().iterator()) {
             while (itr.hasNext()) {
-                schemas.add(itr.next());
+                //On MongoDB, Schema return empties if no permission settings
+                String schema = itr.next();
+                if (!Strings.isNullOrEmpty(schema)) {
+                    schemas.add(schema);
+                }
             }
 
             return new ListSchemasResponse(request.getCatalogName(), schemas);
@@ -162,15 +168,58 @@ public class DocDBMetadataHandler
     public ListTablesResponse doListTables(BlockAllocator blockAllocator, ListTablesRequest request)
     {
         MongoClient client = getOrCreateConn(request);
-        List<TableName> tables = new ArrayList<>();
 
         try (MongoCursor<String> itr = client.getDatabase(request.getSchemaName()).listCollectionNames().iterator()) {
+            List<TableName> tables = new ArrayList<>();
             while (itr.hasNext()) {
                 tables.add(new TableName(request.getSchemaName(), itr.next()));
             }
 
             return new ListTablesResponse(request.getCatalogName(), tables, null);
         }
+        catch (MongoCommandException mongoCommandException) {
+            //do this in failed case instead of replace method in case API changes on doc db.
+            logger.warn("Exception on listCollectionNames on Mongo JAVA client, trying with mongo command line.", mongoCommandException);
+            List<TableName> tableNames = doListTablesWithCommand(client, request);
+
+            return new ListTablesResponse(request.getCatalogName(), tableNames.isEmpty() ? ImmutableList.of() : tableNames, null);
+        }
+    }
+
+    /**
+     * This method uses MongoDB command line call to retrieve only list of collections that owner has permission to.
+     *
+     * Currently, Mongo Java client does not support additional config/parameters on listCollections for authorizedCollections only.
+     * Attempt use Mongo Java client `listCollectionNames` to read whole collections without permission for 1+ collection will result in exception
+     *
+     * Example return document
+     * {
+     *   cursor: {
+     *     id: Long("0"),
+     *     ns: 'sample_analytics.$cmd.listCollections',
+     *     firstBatch: [
+                ......
+     *       { name: 'people', type: 'collection' }
+     *     ]
+     *   },
+     *  .....
+     *   }
+     * @param client
+     * @param request
+     * @return
+     */
+    private List<TableName> doListTablesWithCommand(MongoClient client, ListTablesRequest request)
+    {
+        logger.debug("doListTablesWithCommand Start");
+        List<TableName> tables = new ArrayList<>();
+        Document document = client.getDatabase(request.getSchemaName()).runCommand(new Document("listCollections", 1).append("nameOnly", true).append("authorizedCollections", true));
+
+        List<Document> list = ((Document) document.get("cursor")).getList("firstBatch", Document.class);
+        for (Document doc : list) {
+            tables.add(new TableName(request.getSchemaName(), doc.getString("name")));
+        }
+
+        return tables;
     }
 
     /**

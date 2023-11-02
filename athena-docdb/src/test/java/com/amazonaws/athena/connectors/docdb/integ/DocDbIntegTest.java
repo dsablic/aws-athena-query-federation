@@ -51,7 +51,6 @@ import software.amazon.awscdk.core.Stack;
 import software.amazon.awscdk.services.docdb.ClusterParameterGroup;
 import software.amazon.awscdk.services.docdb.DatabaseCluster;
 import software.amazon.awscdk.services.docdb.Endpoint;
-import software.amazon.awscdk.services.docdb.InstanceProps;
 import software.amazon.awscdk.services.docdb.Login;
 import software.amazon.awscdk.services.ec2.InstanceType;
 import software.amazon.awscdk.services.ec2.SecurityGroup;
@@ -108,7 +107,9 @@ public class DocDbIntegTest extends IntegrationTestBase {
      */
     @BeforeClass
     @Override
-    protected void setUp() {
+    protected void setUp()
+            throws Exception
+    {
         cloudFormationClient = new CloudFormationClient(theApp, getDocDbStack());
         try {
             // Create the CloudFormation stack for the DocumentDb cluster.
@@ -172,17 +173,15 @@ public class DocDbIntegTest extends IntegrationTestBase {
                         .build())
                 .instanceIdentifierBase(dbClusterName)
                 .instances(1)
-                .instanceProps(InstanceProps.builder()
-                        .instanceType(new InstanceType("t3.medium"))
-                        .vpc(Vpc.fromVpcAttributes(stack, "DocDbVpcConfig", VpcAttributes.builder()
-                                .vpcId(vpcAttributes.getVpcId())
-                                .privateSubnetIds(vpcAttributes.getPrivateSubnetIds())
-                                .availabilityZones(vpcAttributes.getAvailabilityZones())
-                                .build()))
-                        .securityGroup(SecurityGroup
-                                .fromSecurityGroupId(stack, "DocDbVpcSecurityGroup",
-                                        vpcAttributes.getSecurityGroupId()))
-                        .build())
+                .instanceType(new InstanceType("t3.medium"))
+                .vpc(Vpc.fromVpcAttributes(stack, "DocDbVpcConfig", VpcAttributes.builder()
+                        .vpcId(vpcAttributes.getVpcId())
+                        .privateSubnetIds(vpcAttributes.getPrivateSubnetIds())
+                        .availabilityZones(vpcAttributes.getAvailabilityZones())
+                        .build()))
+                .securityGroup(SecurityGroup
+                        .fromSecurityGroupId(stack, "DocDbVpcSecurityGroup",
+                                vpcAttributes.getSecurityGroupId()))
                 .build();
 
         return stack;
@@ -215,8 +214,10 @@ public class DocDbIntegTest extends IntegrationTestBase {
                 .format("mongodb://%s:%s@%s:%s/?replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false",
                         username, password, endpoint.getHostname(), endpoint.getPort().toString());
         environmentVars.put("default_docdb", connectionString);
-        environmentVars.put("database_name", docdbDbName);
-        environmentVars.put("table_name", docdbTableMovies);
+        environmentVars.put("movies_database_name", docdbDbName);
+        environmentVars.put("movies_table_name", docdbTableMovies);
+        environmentVars.put("datatypes_database_name", INTEG_TEST_DATABASE_NAME);
+        environmentVars.put("datatypes_table_name", TEST_DATATYPES_TABLE_NAME);
     }
 
     /**
@@ -309,7 +310,21 @@ public class DocDbIntegTest extends IntegrationTestBase {
 
         List dbNames = listDatabases();
         logger.info("Databases: {}", dbNames);
-        assertTrue("DB not found.", dbNames.contains(docdbDbName));
+        assertTrue(String.format("DB not found: %s.", docdbDbName), dbNames.contains(docdbDbName));
+        assertTrue(String.format("DB not found: %s.", INTEG_TEST_DATABASE_NAME), dbNames.contains(INTEG_TEST_DATABASE_NAME));
+    }
+
+    @Override
+    public void selectByteArrayTypeTest()
+    {
+        // not supported!
+    }
+
+    @Override
+    public void selectEmptyTableTest()
+    {
+        // mongodb is schema-free, so an empty table registers as having no columns
+        // maybe using glue external metadata for the test tables would solve this
     }
 
     @Test
@@ -322,6 +337,10 @@ public class DocDbIntegTest extends IntegrationTestBase {
         List tableNames = listTables(docdbDbName);
         logger.info("Tables: {}", tableNames);
         assertTrue(String.format("Table not found: %s.", docdbTableMovies), tableNames.contains(docdbTableMovies));
+
+        tableNames = listTables(INTEG_TEST_DATABASE_NAME);
+        logger.info("Tables: {}", tableNames);
+        assertTrue(String.format("Table not found: %s.", TEST_DATATYPES_TABLE_NAME), tableNames.contains(TEST_DATATYPES_TABLE_NAME));
     }
 
     @Test

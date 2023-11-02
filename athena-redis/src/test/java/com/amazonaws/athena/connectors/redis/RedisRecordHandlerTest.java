@@ -42,6 +42,7 @@ import com.amazonaws.athena.connectors.redis.util.MockKeyScanCursor;
 import com.amazonaws.athena.connectors.redis.util.MockScoredValueScanCursor;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.PutObjectResult;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectInputStream;
@@ -63,31 +64,33 @@ import org.junit.Test;
 import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
-import org.mockito.runners.MockitoJUnitRunner;
+import org.mockito.junit.MockitoJUnitRunner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.amazonaws.athena.connector.lambda.domain.predicate.Constraints.DEFAULT_NO_LIMIT;
 import static com.amazonaws.athena.connectors.redis.RedisMetadataHandler.KEY_COLUMN_NAME;
 import static com.amazonaws.athena.connectors.redis.RedisMetadataHandler.KEY_PREFIX_TABLE_PROP;
 import static com.amazonaws.athena.connectors.redis.RedisMetadataHandler.KEY_TYPE;
 import static com.amazonaws.athena.connectors.redis.RedisMetadataHandler.REDIS_ENDPOINT_PROP;
 import static com.amazonaws.athena.connectors.redis.RedisMetadataHandler.VALUE_TYPE_TABLE_PROP;
 import static org.junit.Assert.*;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyObject;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -129,16 +132,16 @@ public class RedisRecordHandlerTest
     {
         logger.info("{}: enter", testName.getMethodName());
 
-        when(mockFactory.getOrCreateConn(eq(decodedEndpoint), anyBoolean(), anyBoolean())).thenReturn(mockConnection);
+        when(mockFactory.getOrCreateConn(eq(decodedEndpoint), anyBoolean(), anyBoolean(), any())).thenReturn(mockConnection);
         when(mockConnection.sync()).thenReturn(mockSyncCommands);
 
         allocator = new BlockAllocatorImpl();
 
         amazonS3 = mock(AmazonS3.class);
 
-        when(amazonS3.putObject(anyObject(), anyObject(), anyObject(), anyObject()))
+        Mockito.lenient().when(amazonS3.putObject(any()))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> {
-                    InputStream inputStream = (InputStream) invocationOnMock.getArguments()[2];
+                    InputStream inputStream = ((PutObjectRequest) invocationOnMock.getArguments()[0]).getInputStream();
                     ByteHolder byteHolder = new ByteHolder();
                     byteHolder.setBytes(ByteStreams.toByteArray(inputStream));
                     synchronized (mockS3Storage) {
@@ -148,7 +151,7 @@ public class RedisRecordHandlerTest
                     return mock(PutObjectResult.class);
                 });
 
-        when(amazonS3.getObject(anyString(), anyString()))
+        Mockito.lenient().when(amazonS3.getObject(nullable(String.class), nullable(String.class)))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> {
                     S3Object mockObject = mock(S3Object.class);
                     ByteHolder byteHolder;
@@ -163,16 +166,16 @@ public class RedisRecordHandlerTest
                     return mockObject;
                 });
 
-        when(mockSecretsManager.getSecretValue(any(GetSecretValueRequest.class)))
+        when(mockSecretsManager.getSecretValue(nullable(GetSecretValueRequest.class)))
                 .thenAnswer((InvocationOnMock invocation) -> {
-                    GetSecretValueRequest request = invocation.getArgumentAt(0, GetSecretValueRequest.class);
+                    GetSecretValueRequest request = invocation.getArgument(0, GetSecretValueRequest.class);
                     if ("endpoint".equalsIgnoreCase(request.getSecretId())) {
                         return new GetSecretValueResult().withSecretString(decodedEndpoint);
                     }
                     throw new RuntimeException("Unknown secret " + request.getSecretId());
                 });
 
-        handler = new RedisRecordHandler(amazonS3, mockSecretsManager, mockAthena, mockFactory);
+        handler = new RedisRecordHandler(amazonS3, mockSecretsManager, mockAthena, mockFactory, com.google.common.collect.ImmutableMap.of());
         spillReader = new S3BlockSpillReader(amazonS3, allocator);
 
         logger.info("setUpBefore - exit");
@@ -190,7 +193,7 @@ public class RedisRecordHandlerTest
             throws Exception
     {
         //4 keys per prefix
-        when(mockSyncCommands.scan(any(ScanCursor.class), any(ScanArgs.class))).then((InvocationOnMock invocationOnMock) -> {
+        when(mockSyncCommands.scan(nullable(ScanCursor.class), nullable(ScanArgs.class))).then((InvocationOnMock invocationOnMock) -> {
             ScanCursor cursor = (ScanCursor) invocationOnMock.getArguments()[0];
             if (cursor == null || cursor.getCursor().equals("0")) {
                 List<String> result = new ArrayList<>();
@@ -214,7 +217,7 @@ public class RedisRecordHandlerTest
         });
 
         AtomicLong value = new AtomicLong(0);
-        when(mockSyncCommands.get(anyString()))
+        when(mockSyncCommands.get(nullable(String.class)))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> String.valueOf(value.getAndIncrement()));
 
         S3SpillLocation splitLoc = S3SpillLocation.newBuilder()
@@ -246,7 +249,7 @@ public class RedisRecordHandlerTest
                 TABLE_NAME,
                 schemaForRead,
                 split,
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 100_000_000_000L, //100GB don't expect this to spill
                 100_000_000_000L
         );
@@ -275,7 +278,7 @@ public class RedisRecordHandlerTest
             throws Exception
     {
         //4 keys per prefix
-        when(mockSyncCommands.scan(any(ScanCursor.class), any(ScanArgs.class))).then((InvocationOnMock invocationOnMock) -> {
+        when(mockSyncCommands.scan(nullable(ScanCursor.class), nullable(ScanArgs.class))).then((InvocationOnMock invocationOnMock) -> {
             ScanCursor cursor = (ScanCursor) invocationOnMock.getArguments()[0];
             if (cursor == null || cursor.getCursor().equals("0")) {
                 List<String> result = new ArrayList<>();
@@ -303,7 +306,7 @@ public class RedisRecordHandlerTest
 
         //4 columns per key
         AtomicLong intColVal = new AtomicLong(0);
-        when(mockSyncCommands.hgetall(anyString())).then((InvocationOnMock invocationOnMock) -> {
+        when(mockSyncCommands.hgetall(nullable(String.class))).then((InvocationOnMock invocationOnMock) -> {
             Map<String, String> result = new HashMap<>();
             result.put("intcol", String.valueOf(intColVal.getAndIncrement()));
             result.put("stringcol", UUID.randomUUID().toString());
@@ -312,7 +315,7 @@ public class RedisRecordHandlerTest
         });
 
         AtomicLong value = new AtomicLong(0);
-        when(mockSyncCommands.get(anyString()))
+        Mockito.lenient().when(mockSyncCommands.get(nullable(String.class)))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> String.valueOf(value.getAndIncrement()));
 
         S3SpillLocation splitLoc = S3SpillLocation.newBuilder()
@@ -345,7 +348,7 @@ public class RedisRecordHandlerTest
                 TABLE_NAME,
                 schemaForRead,
                 split,
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 100_000_000_000L, //100GB don't expect this to spill
                 100_000_000_000L
         );
@@ -379,7 +382,7 @@ public class RedisRecordHandlerTest
             throws Exception
     {
         //4 keys per prefix
-        when(mockSyncCommands.scan(any(ScanCursor.class), any(ScanArgs.class))).then((InvocationOnMock invocationOnMock) -> {
+        when(mockSyncCommands.scan(nullable(ScanCursor.class), nullable(ScanArgs.class))).then((InvocationOnMock invocationOnMock) -> {
             ScanCursor cursor = (ScanCursor) invocationOnMock.getArguments()[0];
             if (cursor == null || cursor.getCursor().equals("0")) {
                 List<String> result = new ArrayList<>();
@@ -403,7 +406,7 @@ public class RedisRecordHandlerTest
         });
 
         //4 rows per key
-        when(mockSyncCommands.zscan(anyString(), any(ScanCursor.class))).then((InvocationOnMock invocationOnMock) -> {
+        when(mockSyncCommands.zscan(nullable(String.class), nullable(ScanCursor.class))).then((InvocationOnMock invocationOnMock) -> {
             ScanCursor cursor = (ScanCursor) invocationOnMock.getArguments()[1];
             if (cursor == null || cursor.getCursor().equals("0")) {
                 List<ScoredValue<String>> result = new ArrayList<>();
@@ -427,7 +430,7 @@ public class RedisRecordHandlerTest
         });
 
         AtomicLong value = new AtomicLong(0);
-        when(mockSyncCommands.get(anyString()))
+        Mockito.lenient().when(mockSyncCommands.get(nullable(String.class)))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> String.valueOf(value.getAndIncrement()));
 
         S3SpillLocation splitLoc = S3SpillLocation.newBuilder()
@@ -459,7 +462,7 @@ public class RedisRecordHandlerTest
                 TABLE_NAME,
                 schemaForRead,
                 split,
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 100_000_000_000L, //100GB don't expect this to spill
                 100_000_000_000L
         );

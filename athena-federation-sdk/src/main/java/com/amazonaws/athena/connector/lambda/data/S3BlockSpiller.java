@@ -29,7 +29,10 @@ import com.amazonaws.athena.connector.lambda.security.EncryptionKey;
 import com.amazonaws.athena.connector.lambda.security.NoOpBlockCrypto;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.io.ByteStreams;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -39,8 +42,11 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -64,7 +70,10 @@ public class S3BlockSpiller
     private static final long ASYNC_SHUTDOWN_MILLIS = 10_000;
     //The default max number of rows that are allowed to be written per call to writeRows(...)
     private static final int MAX_ROWS_PER_CALL = 100;
+    //Config to set spill queue capacity
+    private static final String SPILL_QUEUE_CAPACITY = "SPILL_QUEUE_CAPACITY";
 
+    private static final String SPILL_PUT_REQUEST_HEADERS_ENV = "spill_put_request_headers";
     //Used to write to S3
     private final AmazonS3 amazonS3;
     //Used to optionally encrypt Blocks.
@@ -100,6 +109,11 @@ public class S3BlockSpiller
     //Time this BlockSpiller wss created.
     private final long startTime = System.currentTimeMillis();
 
+    // Config options
+    // These are from System.getenv() when the connector is being used from an AWS Lambda (*CompositeHandler).
+    // When being used from Spark, it is from the Spark session's options.
+    private final java.util.Map<String, String> configOptions;
+
     /**
      * Constructor which uses the default maxRowsPerCall.
      *
@@ -109,13 +123,15 @@ public class S3BlockSpiller
      * @param schema The schema for blocks that should be written.
      * @param constraintEvaluator The ConstraintEvaluator that should be used to constrain writes.
      */
-    public S3BlockSpiller(AmazonS3 amazonS3,
-            SpillConfig spillConfig,
-            BlockAllocator allocator,
-            Schema schema,
-            ConstraintEvaluator constraintEvaluator)
+    public S3BlockSpiller(
+        AmazonS3 amazonS3,
+        SpillConfig spillConfig,
+        BlockAllocator allocator,
+        Schema schema,
+        ConstraintEvaluator constraintEvaluator,
+        java.util.Map<String, String> configOptions)
     {
-        this(amazonS3, spillConfig, allocator, schema, constraintEvaluator, MAX_ROWS_PER_CALL);
+        this(amazonS3, spillConfig, allocator, schema, constraintEvaluator, MAX_ROWS_PER_CALL, configOptions);
     }
 
     /**
@@ -128,13 +144,16 @@ public class S3BlockSpiller
      * @param constraintEvaluator The ConstraintEvaluator that should be used to constrain writes.
      * @param maxRowsPerCall The max number of rows to allow callers to write in one call.
      */
-    public S3BlockSpiller(AmazonS3 amazonS3,
-            SpillConfig spillConfig,
-            BlockAllocator allocator,
-            Schema schema,
-            ConstraintEvaluator constraintEvaluator,
-            int maxRowsPerCall)
+    public S3BlockSpiller(
+        AmazonS3 amazonS3,
+        SpillConfig spillConfig,
+        BlockAllocator allocator,
+        Schema schema,
+        ConstraintEvaluator constraintEvaluator,
+        int maxRowsPerCall,
+        java.util.Map<String, String> configOptions)
     {
+        this.configOptions = configOptions;
         this.amazonS3 = requireNonNull(amazonS3, "amazonS3 was null");
         this.spillConfig = requireNonNull(spillConfig, "spillConfig was null");
         this.allocator = requireNonNull(allocator, "allocator was null");
@@ -296,6 +315,34 @@ public class S3BlockSpiller
     }
 
     /**
+     * Grabs the request headers from env and sets them on the request
+     */
+    private void setRequestHeadersFromEnv(PutObjectRequest request)
+    {
+        String headersFromEnvStr = configOptions.get(SPILL_PUT_REQUEST_HEADERS_ENV);
+        if (headersFromEnvStr == null || headersFromEnvStr.isEmpty()) {
+            return;
+        }
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            TypeReference<Map<String, String>> typeRef = new TypeReference<Map<String, String>>() {};
+            Map<String, String> headers = mapper.readValue(headersFromEnvStr, typeRef);
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                String oldValue = request.putCustomRequestHeader(entry.getKey(), entry.getValue());
+                if (oldValue != null) {
+                    logger.warn("Key: %s has been overwritten with: %s. Old value: %s",
+                            entry.getKey(), entry.getValue(), oldValue);
+                }
+            }
+        }
+        catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            String message = String.format("Invalid value for environment variable: %s : %s",
+                    SPILL_PUT_REQUEST_HEADERS_ENV, headersFromEnvStr);
+            logger.error(message, e);
+        }
+    }
+
+    /**
      * Writes (aka spills) a Block.
      */
     protected SpillLocation write(Block block)
@@ -310,10 +357,18 @@ public class S3BlockSpiller
             totalBytesSpilled.addAndGet(bytes.length);
 
             logger.info("write: Started spilling block of size {} bytes", bytes.length);
-            amazonS3.putObject(spillLocation.getBucket(),
+
+            // Set the contentLength otherwise the s3 client will buffer again since it
+            // only sees the InputStream wrapper.
+            ObjectMetadata objMeta = new ObjectMetadata();
+            objMeta.setContentLength(bytes.length);
+            PutObjectRequest request = new PutObjectRequest(
+                    spillLocation.getBucket(),
                     spillLocation.getKey(),
                     new ByteArrayInputStream(bytes),
-                    new ObjectMetadata());
+                    objMeta);
+            setRequestHeadersFromEnv(request);
+            amazonS3.putObject(request);
             logger.info("write: Completed spilling block of size {} bytes", bytes.length);
 
             return spillLocation;
@@ -443,10 +498,29 @@ public class S3BlockSpiller
      */
     private ThreadPoolExecutor makeAsyncSpillPool(SpillConfig config)
     {
+        int spillQueueCapacity = config.getNumSpillThreads();
+        if (configOptions.get(SPILL_QUEUE_CAPACITY) != null) {
+            spillQueueCapacity = Integer.parseInt(configOptions.get(SPILL_QUEUE_CAPACITY));
+            logger.debug("Setting Spill Queue Capacity to {}", spillQueueCapacity);
+        }
+
+        RejectedExecutionHandler rejectedExecutionHandler = (r, executor) -> {
+            if (!executor.isShutdown()) {
+                try {
+                    executor.getQueue().put(r);
+                }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RejectedExecutionException("Received an exception while submitting spillBlock task: ", e);
+                }
+            }
+        };
+
         return new ThreadPoolExecutor(config.getNumSpillThreads(),
                 config.getNumSpillThreads(),
                 0L,
                 TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(config.getNumSpillThreads()));
+                new LinkedBlockingQueue<>(spillQueueCapacity),
+                rejectedExecutionHandler);
     }
 }

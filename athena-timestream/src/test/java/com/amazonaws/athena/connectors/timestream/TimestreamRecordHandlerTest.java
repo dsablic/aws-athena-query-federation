@@ -42,6 +42,7 @@ import com.amazonaws.athena.connector.lambda.security.FederatedIdentity;
 import com.amazonaws.athena.connector.lambda.security.LocalKeyFactory;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.PutObjectResult;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectInputStream;
@@ -50,6 +51,7 @@ import com.amazonaws.services.timestreamquery.AmazonTimestreamQuery;
 import com.amazonaws.services.timestreamquery.model.QueryRequest;
 import com.amazonaws.services.timestreamquery.model.QueryResult;
 import com.google.common.io.ByteStreams;
+import org.apache.arrow.vector.complex.reader.FieldReader;
 import org.apache.arrow.vector.types.Types;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.After;
@@ -60,7 +62,7 @@ import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.invocation.InvocationOnMock;
-import org.mockito.runners.MockitoJUnitRunner;
+import org.mockito.junit.MockitoJUnitRunner;
 import org.mockito.stubbing.Answer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,6 +70,8 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -75,14 +79,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static com.amazonaws.athena.connector.lambda.domain.predicate.Constraints.DEFAULT_NO_LIMIT;
 import static com.amazonaws.athena.connector.lambda.handlers.GlueMetadataHandler.VIEW_METADATA_FIELD;
 import static com.amazonaws.athena.connectors.timestream.TestUtils.makeMockQueryResult;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyObject;
-import static org.mockito.Matchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -142,9 +146,9 @@ public class TimestreamRecordHandlerTest
 
         amazonS3 = mock(AmazonS3.class);
 
-        when(amazonS3.putObject(anyObject(), anyObject(), anyObject(), anyObject()))
+        when(amazonS3.putObject(any()))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> {
-                    InputStream inputStream = (InputStream) invocationOnMock.getArguments()[2];
+                    InputStream inputStream = ((PutObjectRequest) invocationOnMock.getArguments()[0]).getInputStream();
                     ByteHolder byteHolder = new ByteHolder();
                     byteHolder.setBytes(ByteStreams.toByteArray(inputStream));
                     synchronized (mockS3Storage) {
@@ -153,7 +157,7 @@ public class TimestreamRecordHandlerTest
                     return mock(PutObjectResult.class);
                 });
 
-        when(amazonS3.getObject(anyString(), anyString()))
+        when(amazonS3.getObject(nullable(String.class), nullable(String.class)))
                 .thenAnswer((InvocationOnMock invocationOnMock) -> {
                     S3Object mockObject = mock(S3Object.class);
                     ByteHolder byteHolder;
@@ -176,7 +180,7 @@ public class TimestreamRecordHandlerTest
                 .addField("region", Types.MinorType.VARCHAR.getType())
                 .build();
 
-        handler = new TimestreamRecordHandler(amazonS3, mockSecretsManager, mockAthena, mockClient);
+        handler = new TimestreamRecordHandler(amazonS3, mockSecretsManager, mockAthena, mockClient, com.google.common.collect.ImmutableMap.of());
         spillReader = new S3BlockSpillReader(amazonS3, allocator);
     }
 
@@ -195,7 +199,7 @@ public class TimestreamRecordHandlerTest
         String expectedQuery = "SELECT measure_name, measure_value::double, az, time, hostname, region FROM \"my_schema\".\"my_table\" WHERE (\"az\" IN ('us-east-1a','us-east-1b'))";
 
         QueryResult mockResult = makeMockQueryResult(schemaForRead, numRowsGenerated);
-        when(mockClient.query(any(QueryRequest.class)))
+        when(mockClient.query(nullable(QueryRequest.class)))
                 .thenAnswer((Answer<QueryResult>) invocationOnMock -> {
                             QueryRequest request = (QueryRequest) invocationOnMock.getArguments()[0];
                             assertEquals(expectedQuery, request.getQueryString().replace("\n", ""));
@@ -223,7 +227,7 @@ public class TimestreamRecordHandlerTest
                 new TableName(DEFAULT_SCHEMA, TEST_TABLE),
                 schemaForRead,
                 splitBuilder.build(),
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 100_000_000_000L, //100GB don't expect this to spill
                 100_000_000_000L
         );
@@ -250,7 +254,7 @@ public class TimestreamRecordHandlerTest
         String expectedQuery = "SELECT measure_name, measure_value::double, az, time, hostname, region FROM \"my_schema\".\"my_table\" WHERE (\"az\" IN ('us-east-1a','us-east-1b'))";
 
         QueryResult mockResult = makeMockQueryResult(schemaForRead, 100_000);
-        when(mockClient.query(any(QueryRequest.class)))
+        when(mockClient.query(nullable(QueryRequest.class)))
                 .thenAnswer((Answer<QueryResult>) invocationOnMock -> {
                             QueryRequest request = (QueryRequest) invocationOnMock.getArguments()[0];
                             assertEquals(expectedQuery, request.getQueryString().replace("\n", ""));
@@ -278,7 +282,7 @@ public class TimestreamRecordHandlerTest
                 new TableName(DEFAULT_SCHEMA, TEST_TABLE),
                 schemaForRead,
                 splitBuilder.build(),
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 1_500_000L, //~1.5MB so we should see some spill
                 0L
         );
@@ -324,7 +328,7 @@ public class TimestreamRecordHandlerTest
         String expectedQuery = "WITH t1 AS ( select measure_name, az,sum(\"measure_value::double\") as value, count(*) as num_samples from \"my_schema\".\"my_table\" group by measure_name, az )  SELECT measure_name, az, value, num_samples FROM t1 WHERE (\"az\" IN ('us-east-1a','us-east-1b'))";
 
         QueryResult mockResult = makeMockQueryResult(schemaForReadView, 1_000);
-        when(mockClient.query(any(QueryRequest.class)))
+        when(mockClient.query(nullable(QueryRequest.class)))
                 .thenAnswer((Answer<QueryResult>) invocationOnMock -> {
                             QueryRequest request = (QueryRequest) invocationOnMock.getArguments()[0];
                             assertEquals(expectedQuery, request.getQueryString().replace("\n", ""));
@@ -352,7 +356,7 @@ public class TimestreamRecordHandlerTest
                 new TableName(DEFAULT_SCHEMA, TEST_VIEW),
                 schemaForReadView,
                 split,
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 100_000_000_000L, //100GB don't expect this to spill
                 100_000_000_000L
         );
@@ -391,7 +395,7 @@ public class TimestreamRecordHandlerTest
         String expectedQuery = "WITH t1 AS ( select az, hostname, region,  CREATE_TIME_SERIES(time, measure_value::double) as cpu_utilization from \"my_schema\".\"my_table\" WHERE measure_name = 'cpu_utilization' GROUP BY measure_name, az, hostname, region )  SELECT region, az, hostname, cpu_utilization FROM t1 WHERE (\"az\" IN ('us-east-1a','us-east-1b'))";
 
         QueryResult mockResult = makeMockQueryResult(schemaForReadView, 1_000);
-        when(mockClient.query(any(QueryRequest.class)))
+        when(mockClient.query(nullable(QueryRequest.class)))
                 .thenAnswer((Answer<QueryResult>) invocationOnMock -> {
                             QueryRequest request = (QueryRequest) invocationOnMock.getArguments()[0];
                             assertEquals("actual: " + request.getQueryString(), expectedQuery, request.getQueryString().replace("\n", ""));
@@ -420,7 +424,7 @@ public class TimestreamRecordHandlerTest
                 new TableName(DEFAULT_SCHEMA, TEST_TABLE),
                 schemaForReadView,
                 split,
-                new Constraints(constraintsMap),
+                new Constraints(constraintsMap, Collections.emptyList(), Collections.emptyList(), DEFAULT_NO_LIMIT),
                 100_000_000_000L, //100GB don't expect this to spill
                 100_000_000_000L
         );
@@ -435,5 +439,66 @@ public class TimestreamRecordHandlerTest
         }
 
         logger.info("readRecordsTimeSeriesView - exit");
+    }
+
+    @Test
+    public void doReadRecordsNoSpillValidateTimeStamp()
+            throws Exception
+    {
+
+        int numRows = 10;
+        String expectedQuery = "SELECT measure_name, measure_value::double, az, time, hostname, region FROM \"my_schema\".\"my_table\" WHERE (\"az\" IN ('us-east-1a'))";
+
+        QueryResult mockResult = makeMockQueryResult(schemaForRead, numRows, numRows, false);
+        when(mockClient.query(nullable(QueryRequest.class)))
+                .thenAnswer((Answer<QueryResult>) invocationOnMock -> {
+                            QueryRequest request = (QueryRequest) invocationOnMock.getArguments()[0];
+                            assertEquals(expectedQuery, request.getQueryString().replace("\n", ""));
+                            return mockResult;
+                        }
+                );
+
+        Map<String, ValueSet> constraintsMap = new HashMap<>();
+        constraintsMap.put("az", EquatableValueSet.newBuilder(allocator, Types.MinorType.VARCHAR.getType(), true, true)
+                .add("us-east-1a").build());
+
+        S3SpillLocation splitLoc = S3SpillLocation.newBuilder()
+                .withBucket(UUID.randomUUID().toString())
+                .withSplitId(UUID.randomUUID().toString())
+                .withQueryId(UUID.randomUUID().toString())
+                .withIsDirectory(true)
+                .build();
+
+        Split.Builder splitBuilder = Split.newBuilder(splitLoc, keyFactory.create());
+
+        ReadRecordsRequest request = new ReadRecordsRequest(IDENTITY,
+                DEFAULT_CATALOG,
+                "queryId-" + System.currentTimeMillis(),
+                new TableName(DEFAULT_SCHEMA, TEST_TABLE),
+                schemaForRead,
+                splitBuilder.build(),
+                new Constraints(constraintsMap),
+                100_000_000_000L, //100GB don't expect this to spill
+                100_000_000_000L
+        );
+
+        RecordResponse rawResponse = handler.doReadRecords(allocator, request);
+
+        assertTrue(rawResponse instanceof ReadRecordsResponse);
+
+        ReadRecordsResponse response = (ReadRecordsResponse) rawResponse;
+        logger.info("doReadRecordsNoSpill: rows[{}]", response.getRecordCount());
+
+        assertTrue(response.getRecords().getRowCount() > 0);
+
+        Block block = response.getRecords();
+        FieldReader time = block.getFieldReader("time");
+        for (int i = 0; i < response.getRecordCount() && i < numRows; i++) {
+            time.setPosition(i);
+            assertTrue(time.readObject() instanceof LocalDateTime);
+            assertEquals(TestUtils.startDate.plusDays(i).truncatedTo(ChronoUnit.MILLIS), time.readObject());
+        }
+
+        logger.info("doReadRecordsNoSpill: {}", BlockUtils.rowToString(response.getRecords(), 0));
     }
 }
