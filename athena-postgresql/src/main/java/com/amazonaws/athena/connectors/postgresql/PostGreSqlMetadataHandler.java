@@ -33,6 +33,8 @@ import com.amazonaws.athena.connector.lambda.metadata.GetDataSourceCapabilitiesR
 import com.amazonaws.athena.connector.lambda.metadata.GetSplitsRequest;
 import com.amazonaws.athena.connector.lambda.metadata.GetSplitsResponse;
 import com.amazonaws.athena.connector.lambda.metadata.GetTableLayoutRequest;
+import com.amazonaws.athena.connector.lambda.metadata.ListTablesRequest;
+import com.amazonaws.athena.connector.lambda.metadata.ListTablesResponse;
 import com.amazonaws.athena.connector.lambda.metadata.optimizations.DataSourceOptimizations;
 import com.amazonaws.athena.connector.lambda.metadata.optimizations.OptimizationSubType;
 import com.amazonaws.athena.connector.lambda.metadata.optimizations.pushdown.ComplexExpressionPushdownSubType;
@@ -66,6 +68,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static com.amazonaws.athena.connectors.jdbc.manager.JdbcMetadataHandler.TABLES_AND_VIEWS;
 import static com.amazonaws.athena.connectors.postgresql.PostGreSqlConstants.POSTGRESQL_DEFAULT_PORT;
 import static com.amazonaws.athena.connectors.postgresql.PostGreSqlConstants.POSTGRESQL_DRIVER_CLASS;
 import static com.amazonaws.athena.connectors.postgresql.PostGreSqlConstants.POSTGRES_NAME;
@@ -85,11 +88,14 @@ public class PostGreSqlMetadataHandler
             "AND parent.relname = ?";
     public static final String BLOCK_PARTITION_COLUMN_NAME = "partition_name";
     public static final String BLOCK_PARTITION_SCHEMA_COLUMN_NAME = "partition_schema_name";
+    private static final String MATERIALIZED_VIEWS = "Materialized Views";
     public static final String ALL_PARTITIONS = "*";
     private static final Logger LOGGER = LoggerFactory.getLogger(PostGreSqlMetadataHandler.class);
     private static final String PARTITION_SCHEMA_NAME = "child_schema";
     private static final String PARTITION_NAME = "child";
     private static final int MAX_SPLITS_PER_REQUEST = 1000_000;
+
+    static final String LIST_PAGINATED_TABLES_QUERY = "SELECT a.\"TABLE_NAME\", a.\"TABLE_SCHEM\" FROM ((SELECT table_name as \"TABLE_NAME\", table_schema as \"TABLE_SCHEM\" FROM information_schema.tables WHERE table_schema = ?) UNION (SELECT matviewname as \"TABLE_NAME\", schemaname as \"TABLE_SCHEM\" from pg_catalog.pg_matviews mv where has_table_privilege(format('%I.%I', mv.schemaname, mv.matviewname), 'select') and schemaname = ?)) AS a ORDER BY a.\"TABLE_NAME\" LIMIT ? OFFSET ?";
 
     /**
      * Instantiates handler to be used by Lambda function directly.
@@ -251,6 +257,20 @@ public class PostGreSqlMetadataHandler
     }
 
     @Override
+    protected ListTablesResponse listPaginatedTables(final Connection connection, final ListTablesRequest listTablesRequest) throws SQLException
+    {
+        String token = listTablesRequest.getNextToken();
+        int pageSize = listTablesRequest.getPageSize();
+
+        int t = token != null ? Integer.parseInt(token) : 0;
+        LOGGER.info("Starting pagination at {} with page size {}", token, pageSize);
+        List<TableName> paginatedTables = getPaginatedResults(connection, listTablesRequest.getSchemaName(), t, pageSize);
+        LOGGER.info("{} tables returned. Next token is {}", paginatedTables.size(), t + pageSize);
+
+        return new ListTablesResponse(listTablesRequest.getCatalogName(), paginatedTables, Integer.toString(t + pageSize));
+    }
+
+    @Override
     protected List<TableName> listTables(final Connection jdbcConnection, final String databaseName)
             throws SQLException
     {
@@ -321,7 +341,7 @@ public class PostGreSqlMetadataHandler
         if (resolvedTableName == null) {
             LOGGER.info(String.format("'%s' not found in case insensitive table look up. Looking for '%s' as case insensitive materialized view", tableName, tableName));
 
-            preparedStatement = getMaterializedViewCaseInsensitive(connection, tableName, resolvedSchemaName);
+            preparedStatement = getMaterializedViewOrExternalTable(connection, tableName, resolvedSchemaName);
             resolvedTableName = caseInsensitiveNameResolver(preparedStatement, tableName, resolvedSchemaName);
             if (resolvedTableName == null) {
                 throw new RuntimeException(String.format("During Case Insensitive look up could not find '%s' in Database '%s'", tableName, resolvedSchemaName));
@@ -355,7 +375,7 @@ public class PostGreSqlMetadataHandler
     @Override
     protected ArrowType getArrayArrowTypeFromTypeName(String typeName, int precision, int scale)
     {
-        switch(typeName) {
+        switch (typeName) {
             case "_bool":
                 return Types.MinorType.BIT.getType();
             case "_int2":
@@ -379,18 +399,38 @@ public class PostGreSqlMetadataHandler
         }
     }
 
-    // Add no op method in redshift because no materialized view, they get treated as regular views
-    private List<TableName> getMaterializedViews(Connection connection, String databaseName) throws SQLException 
+    protected List<TableName> getPaginatedResults(Connection connection, String databaseName, int token, int limit) throws SQLException
     {
-        String materializedViews = "Materialized Views";
+        PreparedStatement preparedStatement = connection.prepareStatement(LIST_PAGINATED_TABLES_QUERY);
+        preparedStatement.setString(1, databaseName);
+        preparedStatement.setString(2, databaseName);
+        preparedStatement.setInt(3, limit);
+        preparedStatement.setInt(4, token);
+        LOGGER.debug("Prepared Statement for getting tables in schema {} : {}", databaseName, preparedStatement);
+        return JDBCUtil.getTableMetadata(preparedStatement, TABLES_AND_VIEWS);
+    }
+
+    // Add no op method in redshift because no materialized view, they get treated as regular views
+    private List<TableName> getMaterializedViews(Connection connection, String databaseName) throws SQLException
+    {
         String sql = "select matviewname as \"TABLE_NAME\", schemaname as \"TABLE_SCHEM\" from pg_catalog.pg_matviews mv where has_table_privilege(format('%I.%I', mv.schemaname, mv.matviewname), 'select') and schemaname = ?";
         PreparedStatement preparedStatement = connection.prepareStatement(sql);
         preparedStatement.setString(1, databaseName);
         LOGGER.debug("Prepared Statement for getting Materialized View in schema {} : {}", databaseName, preparedStatement);
-        return JDBCUtil.getTableMetadata(preparedStatement, materializedViews);
+        return JDBCUtil.getTableMetadata(preparedStatement, MATERIALIZED_VIEWS);
     }
 
-    protected PreparedStatement getMaterializedViewCaseInsensitive(Connection connection, String matviewname, String databaseName) throws SQLException
+    /**
+     * Returns Materialized View for Postgresql Or External Tables for Redshift - Case Insensitive
+     * Note: Redshift maintain Materialized View in the normal schema metadata as regular tables;
+     *       however maintains External Tables in a separate metadata tables
+     * @param connection
+     * @param matviewname
+     * @param databaseName
+     * @return Prepared Statement
+     * @throws SQLException
+     */
+    protected PreparedStatement getMaterializedViewOrExternalTable(Connection connection, String matviewname, String databaseName) throws SQLException
     {
         String sql = "select matviewname as \"TABLE_NAME\" from pg_catalog.pg_matviews mv where (matviewname = ? or lower(matviewname) = ?) and schemaname = ?";
         PreparedStatement preparedStatement = connection.prepareStatement(sql);

@@ -61,7 +61,7 @@
         <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-text</artifactId>
-            <version>1.10.0</version>
+            <version>1.11.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.commons</groupId>
@@ -119,6 +119,11 @@
             <groupId>com.amazonaws</groupId>
             <artifactId>amazon-neptune-gremlin-java-sigv4</artifactId>
             <version>${neptune.sigv4.signer.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.rdf4j</groupId>
+            <artifactId>rdf4j-repository-sparql</artifactId>
+            <version>3.6.3</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
