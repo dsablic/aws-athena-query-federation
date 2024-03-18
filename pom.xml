@@ -4,7 +4,7 @@
     <groupId>com.amazonaws</groupId>
     <artifactId>aws-athena-query-federation</artifactId>
     <packaging>pom</packaging>
-    <version>2022.47.1</version>
+    <version>2024.10.1</version>
     <name>AWS Athena Query Federation</name>
     <description>The Amazon Athena Query Federation SDK allows you to customize Amazon Athena with your own code.</description>
     <url>https://github.com/awslabs/aws-athena-query-federation</url>
@@ -12,35 +12,37 @@
         <!-- Uncomment to target java 8 -->
         <!--<maven.compiler.release>8</maven.compiler.release>-->
         <maven.compiler.release>11</maven.compiler.release>
-        <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
-        <aws-sdk.version>1.12.609</aws-sdk.version>
+        <maven.compiler.plugin.version>3.12.1</maven.compiler.plugin.version>
+        <!--- to meet engine version 1.12.533-->
+        <aws-sdk.version>1.12.676</aws-sdk.version>
         <aws.lambda-java-core.version>1.2.2</aws.lambda-java-core.version>
         <aws.lambda-java-log4j2.version>1.6.0</aws.lambda-java-log4j2.version>
         <aws-cdk.version>1.204.0</aws-cdk.version>
-        <jsii.version>1.93.0</jsii.version>
-        <slf4j-log4j.version>2.0.9</slf4j-log4j.version>
+        <jsii.version>1.95.0</jsii.version>
+        <!--- to meet engine version 2.0.7-->
+        <slf4j-log4j.version>2.0.7</slf4j-log4j.version>
         <mockito.version>4.11.0</mockito.version>
         <junit.version>4.13.2</junit.version>
-        <jqwik.version>1.8.2</jqwik.version>
-        <assertj.version>3.24.2</assertj.version>
-        <testng.version>7.8.0</testng.version>
-        <fasterxml.jackson.version>2.16.0</fasterxml.jackson.version>
-        <surefire.failsafe.version>3.2.2</surefire.failsafe.version>
-        <log4j2Version>2.22.0</log4j2Version>
+        <jqwik.version>1.8.3</jqwik.version>
+        <assertj.version>3.25.3</assertj.version>
+        <testng.version>7.9.0</testng.version>
+        <!--- to meet engine version 2.12.6 -->
+        <fasterxml.jackson.version>2.16.2</fasterxml.jackson.version>
+        <surefire.failsafe.version>3.2.5</surefire.failsafe.version>
+        <log4j2Version>2.23.1</log4j2Version>
         <apache.arrow.version>13.0.0</apache.arrow.version>
-        <netty.version>4.1.101.Final</netty.version>
-        <guava.version>32.1.3-jre</guava.version>
-        <protobuf3.version>3.25.1</protobuf3.version>
+        <guava.version>33.0.0-jre</guava.version>
+        <protobuf3.version>3.25.3</protobuf3.version>
         <antlr.st4.version>4.3.4</antlr.st4.version>
         <log4j2.cachefile.transformer.version>2.15</log4j2.cachefile.transformer.version>
         <apache.httpclient.version>4.5.14</apache.httpclient.version>
-        <mssql.jdbc.version>12.4.2.jre11</mssql.jdbc.version>
+        <mssql.jdbc.version>12.6.1.jre11</mssql.jdbc.version>
         <commons.cli.version>1.6.0</commons.cli.version>
         <spark.version>3.2.1</spark.version>
         <test.system.rules.version>1.19.0</test.system.rules.version>
         <!-- These are mvn on purpose to not conflict with the maven.* namespace -->
         <mvn.checkstyle.version>3.3.1</mvn.checkstyle.version>
-        <mvn.shade.plugin.version>3.5.1</mvn.shade.plugin.version>
+        <mvn.shade.plugin.version>3.5.2</mvn.shade.plugin.version>
         <mvn.source.plugin.version>3.3.0</mvn.source.plugin.version>
         <mvn.javadoc.plugin.version>3.6.3</mvn.javadoc.plugin.version>
         <mvn.jar.plugin.version>3.3.0</mvn.jar.plugin.version>
@@ -51,7 +53,7 @@
             <dependency>
                 <groupId>org.junit</groupId>
                 <artifactId>junit-bom</artifactId>
-                <version>5.10.1</version>
+                <version>5.10.2</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -288,7 +290,7 @@
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>license-maven-plugin</artifactId>
-                <version>2.3.0</version>
+                <version>2.4.0</version>
                 <configuration>
                     <verbose>false</verbose>
                     <addSvnKeyWords>false</addSvnKeyWords>

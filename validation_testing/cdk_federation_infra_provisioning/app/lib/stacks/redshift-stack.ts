@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import { aws_redshift as cfnredshift } from 'aws-cdk-lib';
 import * as redshift from '@aws-cdk/aws-redshift-alpha';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as glue from '@aws-cdk/aws-glue-alpha';
@@ -53,6 +54,7 @@ export class RedshiftStack extends cdk.Stack {
     securityGroup.addIngressRule(securityGroup, ec2.Port.allTcp());
 
     // https://github.com/aws/aws-cdk/blob/main/packages/%40aws-cdk/aws-redshift/lib/cluster.ts
+    // Original L2 Construct
     const cluster = new redshift.Cluster(this, 'redshift_cluster', {
         numberOfNodes: 2,
         port: 5439,
@@ -70,7 +72,7 @@ export class RedshiftStack extends cdk.Stack {
         publiclyAccessible: false // this is the default but just to be explicit
     });
     cluster.addToParameterGroup('enable_case_sensitive_identifier', 'true');
-
+    
     const s3Spill = new s3.Bucket(this, 'redshift_spill_location', {});
 
     const connectionString = `jdbc:redshift://${cluster.clusterEndpoint.socketAddress}/test?user=athena&password=${password}`;
