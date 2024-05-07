@@ -50,6 +50,7 @@
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk-emr</artifactId>
             <version>${aws-sdk.version}</version>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.apache.directory.server</groupId>
@@ -120,7 +121,7 @@
         <dependency>
             <groupId>org.apache.hadoop</groupId>
             <artifactId>hadoop-common</artifactId>
-            <version>3.3.6</version>
+            <version>3.4.0</version>
             <exclusions>
                 <exclusion>
                     <groupId>org.eclipse.jetty</groupId>
